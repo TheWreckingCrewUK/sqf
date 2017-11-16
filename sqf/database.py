@@ -391,6 +391,7 @@ EXPRESSIONS = [
     BinaryExpression(Control, Keyword('drawLocation'), Location, Nothing),
     BinaryExpression(Control, Keyword('drawPolygon'), Array, Nothing),
     BinaryExpression(Control, Keyword('drawRectangle'), Array, Nothing),
+    BinaryExpression(Control, Keyword('drawTriangle'), Array, Nothing),
     BinaryExpression(Control, Keyword('editObject'), String, Anything),
     BinaryExpression(Control, Keyword('editorSetEventHandler'), Array, Nothing),
     BinaryExpression(Code, Keyword('else'), Code, Array),
