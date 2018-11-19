@@ -276,7 +276,7 @@ class GeneralTestCase(TestCase):
         errors = analyzer.exceptions
         self.assertEqual(len(errors), 1)
         self.assertEqual(errors[0].message,
-                         'error:Unary operator "parseNumber" only accepts argument '
+                         'error:Unary operator "parsenumber" only accepts argument '
                          'of types [String,Boolean] (rhs is Number)')
 
     def test_error_message_binary(self):
@@ -390,6 +390,12 @@ class GeneralTestCase(TestCase):
         code = 'x = {call x}; call x'
         analyzer = analyze(parse(code))
         self.assertEqual(Code(), analyzer['x'])
+
+    def test_recursive_assign(self):
+        code = 'private _x = {call _x}'
+        analyzer = analyze(parse(code))
+        self.assertEqual(Code(), analyzer['_x'])
+        self.assertEqual(analyzer.exceptions, [])
 
     def test_with_namespace_simple(self):
         code = 'with uinamespace do {x = 2}'
@@ -1046,10 +1052,27 @@ class SpecialContext(TestCase):
         analyzer = analyze(parse(code))
         self.assertEqual(analyzer.exceptions, [])
 
-    def test_spawn(self):
+    def test_spawn_thisScript(self):
         code = '[] spawn {x = _thisScript}'
         analyzer = analyze(parse(code))
         self.assertEqual(len(analyzer.exceptions), 0)
+
+    def test_spawn_this_typing_correct(self):
+        code = '"" spawn {hint _this}'
+        analyzer = analyze(parse(code))
+        self.assertEqual(len(analyzer.exceptions), 0)
+
+    def test_spawn_this_typing_error(self):
+        code = '[] spawn {hint _this}'
+        analyzer = analyze(parse(code))
+        self.assertEqual(len(analyzer.exceptions), 1)
+
+    def test_spawn_local_vars(self):
+        # spawn should not use local variables because they may become undefined (error 1). Likewise,
+        # the local variable becomes unused (error 2).
+        code = 'private _x = 1; [] spawn {x = _x}'
+        analyzer = analyze(parse(code))
+        self.assertEqual(len(analyzer.exceptions), 2)
 
 
 class UndefinedValues(TestCase):
@@ -1307,6 +1330,17 @@ class SpecialComment(TestCase):
         self.assertEqual(len(errors), 2)
         self.assertEqual(errors[0].message, 'warning:USES_VARIABLES comment must be `//USES_VARIABLES ["var1",...]`')
 
+    def test_var_type(self):
+        code = '//USES_VARIABLES ["_x"];\n' \
+               '_x isKindOf "sdas"'
+        analyzer = analyze(parse(code))
+        self.assertEqual(analyzer.exceptions, [])
+
+    def test_with_space(self):
+        code = '//USES_VARIABLES ["_x", "_y"];'
+        analyzer = analyze(parse(code))
+        self.assertEqual(analyzer.exceptions, [])
+
 
 class UnusedVariables(TestCase):
     def test_simple(self):
@@ -1324,3 +1358,35 @@ class UnusedVariables(TestCase):
         code = 'private _x = ""; AF(_x)'
         analyzer = analyze(parse(code))
         self.assertEqual(analyzer.exceptions, [])
+
+
+class StringAsCodeFunctions(TestCase):
+    """
+    Tests functions that are passed a string which is compiled to code.
+    """
+    def test_isNil(self):
+        code = 'private _var = A getVariable "x"; x = isNil "_var";'
+        analyzer = analyze(parse(code))
+        self.assertEqual(len(analyzer.exceptions), 0)
+
+    def test_isNil_undefined(self):
+        code = 'x = isNil "_var";'
+        analyzer = analyze(parse(code))
+        self.assertEqual(len(analyzer.exceptions), 1)
+
+    def test_isNil_error(self):
+        code = 'x = isNil "(_var";'
+        analyzer = analyze(parse(code))
+        self.assertEqual(len(analyzer.exceptions), 1)
+        self.assertTrue('Parenthesis "(" not closed' in analyzer.exceptions[0].message)
+
+    def test_isNil_function(self):
+        code = 'x = isNil format []\n'
+        analyzer = analyze(parse(code))
+        self.assertEqual(analyzer.exceptions, [])
+
+    def test_configClass(self):
+        code = 'private _defaultCrew = getText (configFile >> "cfgVehicles" >> "All" >> "crew");' \
+               '"isClass _x && {getNumber (_x >> \'scope\') == 2} && {getText (_x >> \'crew\') != _defaultCrew}" configClasses (configFile >> "cfgVehicles")'
+        analyzer = analyze(parse(code))
+        self.assertEqual(len(analyzer.exceptions), 0)

@@ -159,14 +159,17 @@ class Analyzer(BaseInterpreter):
 
         return result
 
-    def execute_unexecuted_code(self, code_key):
+    def execute_unexecuted_code(self, code_key, extra_scope=None, own_namespace=False):
         """
         Executes a code in a dedicated env and put consequence exceptions in self.
+
+        own_namespace: whether the execution uses the current local variables or no variables
         """
         container = self._unexecuted_codes[code_key]
 
         analyzer = Analyzer()
-        analyzer._namespaces = container.namespaces
+        if not own_namespace:
+            analyzer._namespaces = container.namespaces
         analyzer.variable_uses = self.variable_uses
         analyzer.delete_scope_level = container.delete_scope_level
 
@@ -176,7 +179,7 @@ class Analyzer(BaseInterpreter):
         this = Anything()
         this.position = container.position
 
-        analyzer.execute_code(file, extra_scope={'_this': this},
+        analyzer.execute_code(file, extra_scope=extra_scope,
                               namespace_name=container.namespace_name, delete_mode=True)
 
         self.exceptions.extend(analyzer.exceptions)
@@ -326,11 +329,15 @@ class Analyzer(BaseInterpreter):
             else:
                 lhs = self.get_variable(base_tokens[0])
 
-            rhs_v = self.value(base_tokens[2])
-
             if not isinstance(lhs, Variable):
                 self.exception(SQFParserError(base_tokens[0].position, 'lhs of assignment operator must be a variable'))
             else:
+                # if the rhs_v is code and calls `lhs` (recursion) it will assume lhs is anything (and not Nothing)
+                scope = self.get_scope(lhs.name)
+                if lhs.name not in scope or isinstance(scope[lhs.name], Nothing):
+                    scope[lhs.name] = Anything()
+
+                rhs_v = self.value(base_tokens[2])
                 self.assign(lhs, rhs_v)
                 if not statement.ending:
                     outcome = rhs_v
@@ -379,6 +386,23 @@ class Analyzer(BaseInterpreter):
         if case_found:
             # if exact match, we run the expression.
             if case_found.is_match(values):
+                # parse and execute the string that is code (to count usage of variables)
+                if case_found.keyword == Keyword('isnil') and type(values[1]) == String or \
+                   case_found.keyword == Keyword('configClasses'):
+                    code_position = {'isnil': 1, 'configclasses': 0}[case_found.keyword.unique_token]
+                    extra_scope = {'isnil': None, 'configclasses': {'_x': Anything()}}[case_found.keyword.unique_token]
+
+                    # when the string is undefined, there is no need to evaluate it.
+                    if not values[code_position].is_undefined:
+                        try:
+                            code = Code([parse(values[code_position].value)])
+                            code.position = values[code_position].position
+                            self.execute_code(code, extra_scope=extra_scope)
+                        except SQFParserError as e:
+                            self.exceptions.append(
+                                SQFParserError(values[code_position].position,
+                                               'Error while parsing a string to code: %s' % e.message))
+                # finally, execute the statement
                 outcome = case_found.execute(values, self)
             elif len(possible_expressions) == 1 or all_equal([x.return_type for x in possible_expressions]):
                 return_type = possible_expressions[0].return_type
@@ -402,13 +426,18 @@ class Analyzer(BaseInterpreter):
             elif case_found.keyword == Keyword('catch'):
                 extra_scope = {'_exception': Anything()}
             elif case_found.keyword == Keyword('spawn'):
-                extra_scope = {'_thisScript': Script()}
+                extra_scope = {'_thisScript': Script(), '_this': values[0]}
             elif case_found.keyword == Keyword('do') and type(values[0]) == ForType:
                 extra_scope = {values[0].variable.value: Number()}
             for value, t_or_v in zip(values, case_found.types_or_values):
                 # execute all pieces of code
                 if t_or_v == Code and isinstance(value, Code) and self.code_key(value) not in self._executed_codes:
-                    self.execute_code(value, extra_scope=extra_scope, namespace_name=self.current_namespace.name, delete_mode=True)
+                    if case_found.keyword == Keyword('spawn'):
+                        self.execute_unexecuted_code(self.code_key(value), extra_scope, True)
+                        # this code was executed, so it does not need to be evaluated on an un-executed env.
+                        del self._unexecuted_codes[self.code_key(value)]
+                    else:
+                        self.execute_code(value, extra_scope=extra_scope, namespace_name=self.current_namespace.name, delete_mode=True)
 
                 # remove evaluated interpreter tokens
                 if isinstance(value, InterpreterType) and value in self.unevaluated_interpreter_tokens:
@@ -492,6 +521,11 @@ class Analyzer(BaseInterpreter):
                     array = parsed_statement[0][0]
                     assert(isinstance(array, Array))
                     self.add_privates(self.value(array))
+                    # these are unknown values.
+                    for token in array.value:
+                        if isinstance(token, Statement):
+                            token = token.base_tokens[0]
+                        self.current_scope[token.value] = Anything()
                 except Exception:
                     self.exception(SQFWarning(statement.position, '{0} comment must be `//{0} ["var1",...]`'.format(matches[0])))
 
